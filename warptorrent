@@ -1,36 +1,101 @@
 #!/usr/bin/env bash
-# Usage:
-#   ./warptorrent "<magnet|torrent-url|infohash>" [output-folder]   download through WARP (default: ./downloads)
-#   ./warptorrent leaktest                                          verify egress IP + kill switch
-#   ./warptorrent status                                            show tunnel exit IP
-#   ./warptorrent stop                                              stop everything
+# Usage: ./warptorrent [options] "<magnet|torrent-url|infohash>" [output-folder]
+#        ./warptorrent [options] status|leaktest
+#
+# Options:
+#   --masque     tunnel WARP over MASQUE (HTTP/3 on UDP 443) instead of WireGuard
+#   --stream     serve the files over HTTP on 127.0.0.1 (prints URLs for VLC etc.) and keep
+#                running after the download completes, until Ctrl-C, so playback isn't cut off
+#   --port N     stream server port (default 8888)
+#
+# Commands:
+#   status       show the tunnel's exit IP
+#   leaktest     verify exit IP and that nothing leaks when the tunnel fails
+#
+# The tunnel starts on demand and is torn down when this command exits (including Ctrl-C),
+# unless another warptorrent download is still using it.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 cd "$here"
 
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; }
+
+mode=wireguard
+export STREAM_PORT=8888 STREAM=0
+args=()
+while (($#)); do
+  case "$1" in
+    --masque) mode=masque ;;
+    --port) [[ "${2:-}" =~ ^[0-9]+$ ]] || { echo "--port needs a number" >&2; exit 2; }; STREAM_PORT="$2"; shift ;;
+    --stream) STREAM=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) args+=("$1") ;;
+  esac
+  shift
+done
+set -- "${args[@]+"${args[@]}"}"
+
 if docker compose version >/dev/null 2>&1; then compose=(docker compose)
 elif command -v docker-compose >/dev/null; then compose=(docker-compose)
 else echo "need docker compose (or docker-compose)" >&2; exit 1; fi
+compose+=(-f compose.yaml -f "compose.$mode.yaml")
 
 export HOST_UID HOST_GID
 HOST_UID="$(id -u)"; HOST_GID="$(id -g)"
 
+other_clients() {
+  docker ps -q --filter label=com.docker.compose.project=warptorrent \
+    --filter label=com.docker.compose.service=torrent
+}
+
+# Tear the tunnel down on exit, unless another download is still using it.
+teardown() {
+  trap - EXIT INT TERM
+  if [[ -n "$(other_clients)" ]]; then
+    echo "→ leaving tunnel up: another warptorrent download is still using it" >&2
+  else
+    "${compose[@]}" down --remove-orphans >/dev/null 2>&1 || true
+    echo "→ tunnel stopped" >&2
+  fi
+}
+
 ensure_tunnel() {
-  [[ -f config/warp.env ]] || ./scripts/setup-warp.sh
-  "${compose[@]}" up -d --wait gluetun >/dev/null
+  case "$mode" in
+    wireguard) [[ -f config/warp.env ]] || ./scripts/setup-warp.sh ;;
+    masque)    [[ -s config/usque.json ]] || ./scripts/setup-masque.sh ;;
+  esac
+  local running
+  running=$(docker inspect -f '{{index .Config.Labels "warptorrent.mode"}}' warptorrent-tunnel 2>/dev/null || true)
+  trap teardown EXIT
+  trap 'exit 130' INT TERM
+  if [[ -n "$running" && -n "$(other_clients)" ]]; then
+    # Another download is using the tunnel: reuse it untouched. Recreating it (different mode
+    # or port) would cut that download off, so refuse instead.
+    local port
+    port=$(docker port warptorrent-tunnel 2>/dev/null | awk -F: 'NR==1{print $NF}')
+    if [[ "$running" != "$mode" ]]; then
+      echo "a $running download is running; switching to $mode would cut it off. Rerun with$([[ $running == masque ]] && echo ' --masque' || echo 'out --masque') or wait for it to finish." >&2
+      exit 1
+    fi
+    if [[ -n "$port" && "$port" != "$STREAM_PORT" ]]; then
+      echo "another download is running with the stream on port $port; rerun with --port $port" >&2
+      exit 1
+    fi
+    return
+  fi
+  [[ -z "$running" || "$running" == "$mode" ]] || echo "→ switching tunnel from $running to $mode"
+  "${compose[@]}" up -d --build --wait --remove-orphans tunnel >/dev/null
 }
 
 case "${1:-}" in
-  ""|-h|--help)
-    sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-  stop)
-    "${compose[@]}" down; exit 0 ;;
+  "") usage; exit 0 ;;
   status)
     ensure_tunnel
-    docker run --rm --network container:warptorrent-gluetun curlimages/curl:latest \
+    echo "mode=$mode"
+    docker run --rm --network container:warptorrent-tunnel curlimages/curl:latest \
       -s https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|colo|warp)='; exit 0 ;;
   leaktest)
-    ensure_tunnel; exec ./scripts/leaktest.sh ;;
+    ensure_tunnel; ./scripts/leaktest.sh; exit ;;
 esac
 
 torrent_id="$1"
@@ -45,5 +110,13 @@ fi
 
 ensure_tunnel
 "${compose[@]}" build -q torrent
-echo "→ downloading into $out"
-OUTPUT_DIR="$out" TORRENT_ID="$torrent_id" exec "${compose[@]}" run --rm --no-deps torrent
+echo "→ $mode tunnel up; downloading into $out"
+# Run the client in the background so a signal to this script (Ctrl-C, kill) is handled right
+# away: stop the client container (it shuts down cleanly on SIGTERM), then the EXIT trap tears
+# the tunnel down.
+client="warptorrent-client-$$"
+stop_client() { docker stop -t 10 "$client" >/dev/null 2>&1 || true; wait "$pid" 2>/dev/null || true; exit 130; }
+OUTPUT_DIR="$out" TORRENT_ID="$torrent_id" "${compose[@]}" run --rm --no-deps -T --name "$client" torrent &
+pid=$!
+trap stop_client INT TERM
+wait "$pid"

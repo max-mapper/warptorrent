@@ -4,20 +4,27 @@
 #   2. Simulated WARP outage (packets to the WARP endpoint are dropped, so the tunnel is
 #      dead but still "up"): nothing gets out — by IP, by hostname, TCP or UDP.
 #   3. Tunnel interface torn down: same, nothing gets out.
-# Each probe re-checks that the fault is still in place, because gluetun's watchdog actively
-# tries to heal the tunnel and a probe through a healed tunnel would prove nothing.
+# Each probe re-checks that the fault is still in place, because the tunnel actively tries to
+# heal itself and a probe through a healed tunnel would prove nothing.
+# Works for both modes (WireGuard/gluetun and MASQUE/usque): it tests the running tunnel container.
 # Probes run in throwaway containers that join gluetun's namespace, like the torrent client.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-C=warptorrent-gluetun
+C=warptorrent-tunnel
 NS="container:$C"
-ENDPOINT=$(awk -F= '$1=="WIREGUARD_ENDPOINT_IP"{print $2}' config/warp.env)
+MODE=$(docker inspect -f '{{index .Config.Labels "warptorrent.mode"}}' "$C")
+case "$MODE" in
+  wireguard) ENDPOINT=$(awk -F= '$1=="WIREGUARD_ENDPOINT_IP"{print $2}' config/warp.env) ;;
+  masque)    ENDPOINT=$(docker exec "$C" jq -r .endpoint_v4 /config/usque.json) ;;
+  *) echo "unknown tunnel mode '$MODE'" >&2; exit 1 ;;
+esac
+echo "tunnel mode: $MODE (endpoint $ENDPOINT)"
 pass() { echo "  ✓ $*"; }
 fail() { echo "  ✗ $*"; exit 1; }
 trace() { docker run --rm --network "$NS" curlimages/curl:latest -s --max-time "${1:-15}" https://www.cloudflare.com/cdn-cgi/trace; }
 
-restore() { echo "→ restoring: restarting gluetun"; docker restart "$C" >/dev/null; }
+restore() { echo "→ restoring: restarting tunnel"; docker restart "$C" >/dev/null; }
 trap restore EXIT
 
 docker pull -q curlimages/curl:latest >/dev/null; docker pull -q busybox:latest >/dev/null
