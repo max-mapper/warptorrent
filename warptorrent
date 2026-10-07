@@ -38,11 +38,10 @@ out="${2:-$here/downloads}"
 mkdir -p "$out"
 out="$(cd "$out" && pwd)"
 
-# Colima / Docker Desktop only share your home folder with the VM by default.
-case "$out" in
-  "$HOME"/*) ;;
-  *) echo "warning: $out is outside \$HOME; your Docker VM may not be able to mount it" >&2 ;;
-esac
+# Where Docker runs inside a VM (macOS, Windows), only shared folders (by default $HOME) can be mounted.
+if [[ "$(uname -s)" != Linux && "$out" != "$HOME"/* ]]; then
+  echo "warning: $out is outside \$HOME; your Docker VM may not be able to mount it" >&2
+fi
 
 ensure_tunnel
 "${compose[@]}" build -q torrent

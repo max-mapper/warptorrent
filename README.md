@@ -1,6 +1,6 @@
 # warptorrent
 
-Run WebTorrent on a Mac so peers in the swarm only ever see a Cloudflare WARP IP, never yours.
+Run WebTorrent so peers in the swarm only ever see a Cloudflare WARP IP, never yours.
 If the WARP tunnel drops, the client has no network path at all.
 
 ```
@@ -11,18 +11,21 @@ If the WARP tunnel drops, the client has no network path at all.
 ```
 
 The first run registers an anonymous free WARP device. No Cloudflare account, login, or API
-token is needed. Output folder defaults to `./downloads`, and it must be under your home folder
-(Colima and Docker Desktop only share `$HOME` with their VM by default).
+token is needed. Output folder defaults to `./downloads`. If Docker runs inside a VM (Docker
+Desktop, Colima, OrbStack), the folder must be somewhere that VM shares, which by default is your
+home folder.
 
-Requirements: Docker (Colima, OrbStack or Docker Desktop) with `docker compose` or `docker-compose`.
+Requirements: Docker with `docker compose` (or `docker-compose`) and a bash shell. Any Docker that
+runs Linux containers works: Docker Engine, Docker Desktop, Colima, OrbStack, or WSL2 on Windows.
+Images are multi-arch (amd64 and arm64).
 
 ## How it works
 
 ```
- Mac ── Docker VM ──┬─ gluetun container ── tun0 ══ WireGuard ══> Cloudflare WARP (162.159.192.1:2408)
-                    │   iptables: OUTPUT DROP except tun0 + UDP to the WARP endpoint
-                    └─ torrent container (network_mode: service:gluetun, no network of its own)
-                         └─ /downloads  ← bind mount of your output folder
+ host ── Docker ──┬─ gluetun container ── tun0 ══ WireGuard ══> Cloudflare WARP (162.159.192.1:2408)
+                  │   iptables: OUTPUT DROP except tun0 + UDP to the WARP endpoint
+                  └─ torrent container (network_mode: service:gluetun, no network of its own)
+                       └─ /downloads  ← bind mount of your output folder
 ```
 
 - **WARP access:** `scripts/setup-warp.sh` runs [wgcf](https://github.com/ViRb3/wgcf) in a
@@ -41,10 +44,10 @@ Requirements: Docker (Colima, OrbStack or Docker Desktop) with `docker compose` 
   - The client refuses to start unless Cloudflare's trace page reports `warp=on`, re-checks
     every 30 s, and shuts down after 2 failed checks.
 
-## Verified (2026-10-07)
+## Verified (2026-10-07, Docker via Colima on arm64)
 
 `./warptorrent leaktest`:
-- Exit IP is a WARP IP (`104.28.x.x`, `warp=on`). It differs from the Mac's real IPv4 and IPv6.
+- Exit IP is a WARP IP (`104.28.x.x`, `warp=on`). It differs from the host's real IPv4 and IPv6.
 - **Simulated WARP outage** (all packets to the endpoint dropped): HTTPS by hostname, HTTPS to
   1.1.1.1, UDP DNS to 8.8.8.8 / 1.1.1.1 and ICMP were all blocked.
 - **Tunnel interface down:** the same probes were all blocked.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Registers an anonymous free Cloudflare WARP device with wgcf (run inside a throwaway
-# container, so nothing gets installed on the Mac) and converts the WireGuard profile into
+# container, so nothing gets installed on the host) and converts the WireGuard profile into
 # gluetun env vars at config/warp.env. No Cloudflare login or API token is needed.
 set -euo pipefail
 cd "$(dirname "$0")/.."

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Proves the kill switch works.
-#   1. Egress inside the namespace is a WARP IP, different from the Mac's real IPs.
+#   1. Egress inside the namespace is a WARP IP, different from the host's real IPs.
 #   2. Simulated WARP outage (packets to the WARP endpoint are dropped, so the tunnel is
 #      dead but still "up"): nothing gets out — by IP, by hostname, TCP or UDP.
 #   3. Tunnel interface torn down: same, nothing gets out.
@@ -26,8 +26,8 @@ echo "1) egress check"
 real4=$(curl -4 -s --max-time 10 https://www.cloudflare.com/cdn-cgi/trace | awk -F= '$1=="ip"{print $2}' || true)
 real6=$(curl -6 -s --max-time 10 https://www.cloudflare.com/cdn-cgi/trace | awk -F= '$1=="ip"{print $2}' || true)
 t=$(trace); tun_ip=$(awk -F= '$1=="ip"{print $2}' <<<"$t"); warp=$(awk -F= '$1=="warp"{print $2}' <<<"$t")
-echo "  Mac real IPv4 : ${real4:-none}"
-echo "  Mac real IPv6 : ${real6:-none}"
+echo "  host real IPv4: ${real4:-none}"
+echo "  host real IPv6: ${real6:-none}"
 echo "  tunnel IP     : $tun_ip (warp=$warp)"
 [[ "$warp" == on || "$warp" == plus ]] || fail "namespace egress is not WARP"
 [[ "$tun_ip" != "$real4" && "$tun_ip" != "$real6" ]] || fail "tunnel IP equals a real IP"
