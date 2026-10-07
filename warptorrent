@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Usage:
+#   ./warptorrent "<magnet|torrent-url|infohash>" [output-folder]   download through WARP (default: ./downloads)
+#   ./warptorrent leaktest                                          verify egress IP + kill switch
+#   ./warptorrent status                                            show tunnel exit IP
+#   ./warptorrent stop                                              stop everything
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+cd "$here"
+
+if docker compose version >/dev/null 2>&1; then compose=(docker compose)
+elif command -v docker-compose >/dev/null; then compose=(docker-compose)
+else echo "need docker compose (or docker-compose)" >&2; exit 1; fi
+
+export HOST_UID HOST_GID
+HOST_UID="$(id -u)"; HOST_GID="$(id -g)"
+
+ensure_tunnel() {
+  [[ -f config/warp.env ]] || ./scripts/setup-warp.sh
+  "${compose[@]}" up -d --wait gluetun >/dev/null
+}
+
+case "${1:-}" in
+  ""|-h|--help)
+    sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  stop)
+    "${compose[@]}" down; exit 0 ;;
+  status)
+    ensure_tunnel
+    docker run --rm --network container:warptorrent-gluetun curlimages/curl:latest \
+      -s https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|colo|warp)='; exit 0 ;;
+  leaktest)
+    ensure_tunnel; exec ./scripts/leaktest.sh ;;
+esac
+
+torrent_id="$1"
+out="${2:-$here/downloads}"
+mkdir -p "$out"
+out="$(cd "$out" && pwd)"
+
+# Colima / Docker Desktop only share your home folder with the VM by default.
+case "$out" in
+  "$HOME"/*) ;;
+  *) echo "warning: $out is outside \$HOME; your Docker VM may not be able to mount it" >&2 ;;
+esac
+
+ensure_tunnel
+"${compose[@]}" build -q torrent
+echo "→ downloading into $out"
+OUTPUT_DIR="$out" TORRENT_ID="$torrent_id" exec "${compose[@]}" run --rm --no-deps torrent

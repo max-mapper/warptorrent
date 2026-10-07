@@ -1,0 +1,11 @@
+{
+  "name": "warptorrent-client",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "webtorrent": "3.0.21"
+  },
+  "overrides": {
+    "webrtc-polyfill": "file:./no-webrtc"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "webrtc-polyfill",
+  "version": "0.0.0-disabled",
+  "description": "Stub that replaces webrtc-polyfill so WebRTC (and its ICE address leaks) cannot load",
+  "type": "module",
+  "exports": "./index.js"
+}

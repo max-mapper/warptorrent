@@ -1,0 +1,4 @@
+config/
+downloads/
+test-output/
+node_modules/
