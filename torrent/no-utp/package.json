@@ -1,0 +1,6 @@
+{
+  "name": "utp-native",
+  "version": "0.0.0-disabled",
+  "description": "Stub that replaces utp-native: no prebuilt binary exists for this image, so WebTorrent uses TCP",
+  "main": "index.js"
+}

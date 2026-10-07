@@ -36,7 +36,7 @@ Requirements: Docker (Colima, OrbStack or Docker Desktop) with `docker compose` 
   capabilities, as your UID.
 - **WebTorrent hardening** (`torrent/run.mjs`):
   - Router port mapping (UPnP / NAT-PMP) and local-network discovery (LSD) are off.
-  - WebRTC is removed from the image: `webrtc-polyfill` is replaced by a stub in `no-webrtc/`.
+  - WebRTC is removed from the image: `webrtc-polyfill` is replaced by a stub in `torrent/no-webrtc/`.
     Its ICE candidates would otherwise announce local IPs.
   - The client refuses to start unless Cloudflare's trace page reports `warp=on`, re-checks
     every 30 s, and shuts down after 2 failed checks.
@@ -58,8 +58,9 @@ Files were owned by the host user.
   Cloudflare sees your real IP. WARP exit IPs also geolocate near you.
 - **No port forwarding.** Peers can't connect to you, so you get fewer peers and weak seeding.
 - **IPv4 only.** IPv6 is not routed through the tunnel, and gluetun's firewall drops it.
-- **uTP is unavailable.** Its native module isn't built in the image; WebTorrent falls back to TCP
-  and logs a harmless warning.
+- **uTP is disabled.** `utp-native` has no prebuilt binary for this image (Linux/musl/arm64, Node 24),
+  so it's replaced by a stub in `torrent/no-utp/` and WebTorrent uses TCP. The cost is small: uTP mainly
+  helps reach uTP-only peers, and through WARP nobody can connect in to you anyway.
 - **Tunnel drops are not retried by the client.** If gluetun is recreated while a download is
   running, the torrent container stays offline until you rerun the command. That's intended
   (fail closed).

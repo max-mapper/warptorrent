@@ -6,6 +6,7 @@
     "webtorrent": "3.0.21"
   },
   "overrides": {
-    "webrtc-polyfill": "file:./no-webrtc"
+    "webrtc-polyfill": "file:./no-webrtc",
+    "utp-native": "file:./no-utp"
   }
 }
