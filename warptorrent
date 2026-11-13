@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Usage: ./warptorrent [options] "<magnet|torrent-url|infohash>" [output-folder]
-#        ./warptorrent [options] status|leaktest
+# Usage: warptorrent [options] "<magnet|torrent-url|infohash>" [output-folder]
+#        warptorrent [options] status|leaktest
+#
+# Files are saved into output-folder (relative to where you run the command), or into the
+# current folder if it's omitted.
 #
 # Options:
 #   --masque     tunnel WARP over MASQUE (HTTP/3 on UDP 443) instead of WireGuard
@@ -15,10 +18,12 @@
 # The tunnel starts on demand and is torn down when this command exits (including Ctrl-C),
 # unless another warptorrent download is still using it.
 set -euo pipefail
-here="$(cd "$(dirname "$0")" && pwd)"
+caller="$PWD"
+# Resolve symlinks, so the script also works when linked into a PATH directory.
+here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 cd "$here"
 
-usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,19p' "$here/warptorrent" | sed 's/^# \{0,1\}//'; }
 
 mode=wireguard
 export STREAM_PORT=8888 STREAM=0
@@ -38,7 +43,8 @@ set -- "${args[@]+"${args[@]}"}"
 if docker compose version >/dev/null 2>&1; then compose=(docker compose)
 elif command -v docker-compose >/dev/null; then compose=(docker-compose)
 else echo "need docker compose (or docker-compose)" >&2; exit 1; fi
-compose+=(-f compose.yaml -f "compose.$mode.yaml")
+compose+=(-f compose.yaml)
+export WARP_MODE="$mode"
 
 export HOST_UID HOST_GID
 HOST_UID="$(id -u)"; HOST_GID="$(id -g)"
@@ -60,10 +66,12 @@ teardown() {
 }
 
 ensure_tunnel() {
-  case "$mode" in
-    wireguard) [[ -f config/warp.env ]] || ./scripts/setup-warp.sh ;;
-    masque)    [[ -s config/usque.json ]] || ./scripts/setup-masque.sh ;;
-  esac
+  local cfg=config/wgcf-profile.conf
+  [[ "$mode" == masque ]] && cfg=config/usque.json
+  if [[ ! -s "$cfg" ]]; then
+    "${compose[@]}" build -q tunnel
+    ./scripts/register.sh warptorrent-tunnel "$mode" config
+  fi
   local running
   running=$(docker inspect -f '{{index .Config.Labels "warptorrent.mode"}}' warptorrent-tunnel 2>/dev/null || true)
   trap teardown EXIT
@@ -95,16 +103,17 @@ case "${1:-}" in
     docker run --rm --network container:warptorrent-tunnel curlimages/curl:latest \
       -s https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|colo|warp)='; exit 0 ;;
   leaktest)
-    ensure_tunnel; ./scripts/leaktest.sh; exit ;;
+    ensure_tunnel; ./scripts/leaktest.sh warptorrent-tunnel; exit ;;
 esac
 
 torrent_id="$1"
-out="${2:-$here/downloads}"
+out="${2:-$caller}"
+[[ "$out" == /* ]] || out="$caller/$out"
 mkdir -p "$out"
 out="$(cd "$out" && pwd)"
 
 # Where Docker runs inside a VM (macOS, Windows), only shared folders (by default $HOME) can be mounted.
-if [[ "$(uname -s)" != Linux && "$out" != "$HOME"/* ]]; then
+if [[ "$(uname -s)" != Linux && "$out" != "$HOME" && "$out" != "$HOME"/* ]]; then
   echo "warning: $out is outside \$HOME; your Docker VM may not be able to mount it" >&2
 fi
 

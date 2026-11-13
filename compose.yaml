@@ -1,8 +1,9 @@
 # warptorrent: WebTorrent whose ONLY network path is a Cloudflare WARP tunnel.
 #
-# This file holds the torrent client. The `tunnel` service comes from exactly one of:
-#   compose.wireguard.yaml  WARP over WireGuard (gluetun)            ./warptorrent …
-#   compose.masque.yaml     WARP over MASQUE / HTTP/3 (usque)        ./warptorrent --masque …
+# Two services:
+#   tunnel   ./tunnel, the reusable warp-tunnel image. WARP over WireGuard (default) or over
+#            MASQUE / HTTP/3 (./warptorrent --masque), picked by WARP_MODE.
+#   torrent  the WebTorrent client.
 #
 # Kill switch model: the torrent container has no network stack of its own. It shares the
 # tunnel container's namespace (network_mode: service:tunnel), where a default-drop firewall
@@ -11,6 +12,25 @@
 # If the tunnel container dies, the namespace disappears and the client has no network at all.
 
 services:
+  tunnel:
+    build: ./tunnel
+    image: warptorrent-tunnel
+    container_name: warptorrent-tunnel
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "1"   # IPv4 only; the firewall also drops all IPv6
+    environment:
+      WARP_MODE: ${WARP_MODE:-wireguard}
+      BRIDGE_TCP_PORTS: ${STREAM_PORT:-8888}   # stream server, reachable from the Docker bridge only
+    volumes:
+      - ./config:/config   # WARP device keys, written by `register` (secret)
+    ports:
+      - "127.0.0.1:${STREAM_PORT:-8888}:${STREAM_PORT:-8888}"   # stream URL, this computer only
+    labels:
+      warptorrent.mode: ${WARP_MODE:-wireguard}
+    restart: "no"   # started/stopped by ./warptorrent; never comes back on its own
+
   torrent:
     build: ./torrent
     image: warptorrent-client

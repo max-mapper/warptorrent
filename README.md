@@ -4,12 +4,17 @@ Run WebTorrent so peers in the swarm only ever see a Cloudflare WARP IP, never y
 If the WARP tunnel drops, the client has no network path at all.
 
 ```
-./warptorrent "magnet:?xt=urn:btih:…" ~/Movies/torrents            # download into a folder
-./warptorrent --stream "magnet:?xt=urn:btih:…" ~/Movies/torrents   # …and stream it to VLC
-./warptorrent --masque "magnet:?xt=urn:btih:…"                     # tunnel over MASQUE instead
-./warptorrent status                                                # show tunnel exit IP
-./warptorrent leaktest                                              # prove the kill switch works
+warptorrent "magnet:?xt=urn:btih:…"                     # download into the current folder
+warptorrent "magnet:?xt=urn:btih:…" ~/Movies/torrents   # …or into a folder
+warptorrent --stream "magnet:?xt=urn:btih:…"            # …and stream it to VLC
+warptorrent --masque "magnet:?xt=urn:btih:…"            # tunnel over MASQUE instead
+warptorrent status                                       # show tunnel exit IP
+warptorrent leaktest                                     # prove the kill switch works
 ```
+
+To run it from anywhere, link it into a folder on your `PATH`:
+`ln -s "$PWD/warptorrent" ~/.local/bin/warptorrent`. Otherwise run it as `./warptorrent` from
+the repo.
 
 The tunnel starts on demand and is torn down when the command exits, including on Ctrl-C or
 `kill`. Nothing is left running in the background. If several downloads run at once, they share
@@ -25,11 +30,12 @@ tunnel would cut the first one off.
 
 Without `--stream`, the client exits as soon as the download completes.
 
-Options apply to commands too: `./warptorrent --masque status` and `./warptorrent --masque leaktest`
+Options apply to commands too: `warptorrent --masque status` and `warptorrent --masque leaktest`
 test the MASQUE tunnel.
 
 The first run in each mode registers an anonymous free WARP device. No Cloudflare account, login,
-or API token is needed. Output folder defaults to `./downloads`. If Docker runs inside a VM
+or API token is needed. Files are saved into the folder you run the command from, or into the
+output folder you give, relative to where you are. If Docker runs inside a VM
 (Docker Desktop, Colima, OrbStack), the folder must be somewhere that VM shares, which by default
 is your home folder.
 
@@ -68,9 +74,12 @@ How the URL crosses the container boundary safely:
 |---|---|---|
 | On the wire | WireGuard, UDP `162.159.192.1:2408` | HTTP/3 (QUIC), UDP `162.159.198.x:443` |
 | Looks like | an obvious VPN (WireGuard is easy to fingerprint) | ordinary HTTP/3 traffic to Cloudflare |
-| Client | [gluetun](https://github.com/qdm12/gluetun) (mature, widely used) | [usque](https://github.com/Diniboy1123/usque) (open-source; describes itself as unstable) |
-| Kill switch | gluetun's built-in firewall | our own entrypoint (`tunnel-masque/entrypoint.sh`) |
-| WARP config | `config/warp.env` via [wgcf](https://github.com/ViRb3/wgcf) | `config/usque.json` via `usque register` |
+| Client | kernel WireGuard (falls back to `wireguard-go`) | [usque](https://github.com/Diniboy1123/usque) (open-source; describes itself as unstable) |
+| WARP config | `config/wgcf-profile.conf` via [wgcf](https://github.com/ViRb3/wgcf) | `config/usque.json` via `usque register` |
+
+Both modes run in the same tunnel image (`tunnel/`), with the same kill switch and the same
+leaktest. Both registration tools are checksum-verified release binaries inside that image, so
+nothing gets installed on your computer.
 
 Use MASQUE if you'd rather your ISP not see VPN traffic. Either way your ISP can't see what you're
 downloading, but it can still see how much data you move and when.
@@ -78,33 +87,30 @@ downloading, but it can still see how much data you move and when.
 ## How it works
 
 ```
- host ── Docker ──┬─ tunnel container ── tun0 ══ WireGuard or MASQUE ══> Cloudflare WARP
-                  │   firewall: default DROP; allow tun0, the one WARP endpoint,
+ host ── Docker ──┬─ tunnel container ── warp0 ══ WireGuard or MASQUE ══> Cloudflare WARP
+                  │   nftables: default DROP; allow warp0, the one WARP endpoint,
                   │             and the stream port from the Docker bridge
                   │   publishes 127.0.0.1:8888 → stream server (host only)
                   └─ torrent container (network_mode: service:tunnel, no network of its own)
                        └─ /downloads  ← bind mount of your output folder
 ```
 
-- **Compose layout:** `compose.yaml` defines the torrent client. Exactly one of
-  `compose.wireguard.yaml` or `compose.masque.yaml` supplies the `tunnel` service; the wrapper
-  picks it based on `--masque`.
-- **WireGuard tunnel:** `scripts/setup-warp.sh` runs wgcf in a throwaway container
-  (checksum-verified release binary) and writes the keys to `config/warp.env`. gluetun runs the
-  tunnel. Its default-drop firewall lives in the kernel, not in any app process. DNS goes to
-  Cloudflare 1.1.1.1 over DNS-over-TLS, inside the tunnel.
-- **MASQUE tunnel:** `tunnel-masque/` builds a small Alpine image with a checksum-verified usque
-  binary. `scripts/setup-masque.sh` registers a device into `config/usque.json`. Before usque
-  starts, the entrypoint:
-  1. sets iptables and ip6tables policies to DROP, allowing only loopback, replies, `tun0`,
-     UDP 443 to the one MASQUE endpoint, and the stream port from the Docker bridge;
-  2. **deletes the normal default route**, leaving only a /32 route to the endpoint. Without the
-     tunnel there is no route to the internet, independent of the firewall;
-  3. points DNS at 1.1.1.1 / 1.0.0.1, which are reachable only through `tun0`. Docker's built-in
+- **Compose layout:** `compose.yaml` defines both services. `WARP_MODE` (set by the wrapper from
+  `--masque`) picks the tunnel mode.
+- **Tunnel** (`tunnel/`): a small Alpine image. The first run in each mode registers a device into
+  `config/` (`scripts/register.sh`). Before any tunnel process starts, the entrypoint:
+  1. loads one nftables table with every hook's policy set to DROP. It allows only loopback,
+     replies, `warp0`, UDP to the one WARP endpoint, and the stream port from the Docker bridge.
+     Blocked packets are counted in named counters (`nft list counters`);
+  2. **deletes the normal default route**, leaving only a /32 route to the endpoint, plus an
+     `unreachable` default. Without the tunnel there is no route to the internet, independent of
+     the firewall;
+  3. points DNS at 1.1.1.1 / 1.0.0.1, which are reachable only through `warp0`. Docker's built-in
      resolver is bypassed because it would forward queries from the host, outside the tunnel.
 
-  Any setup failure exits the container rather than continuing half-configured. A healthcheck
-  requires `warp=on` before the torrent client starts.
+  Then it starts usque (MASQUE) or configures a WireGuard interface, and routes the default
+  through `warp0`. Any setup failure exits the container rather than continuing half-configured.
+  A healthcheck requires `warp=on` before the torrent client starts.
 - **Torrent client:** the container has no network interface of its own. It borrows the tunnel's
   namespace, so if the tunnel container stops, the client is fully offline. It runs read-only,
   with no Linux capabilities, as your UID.
@@ -115,7 +121,13 @@ downloading, but it can still see how much data you move and when.
   - The client refuses to start unless Cloudflare's trace page reports `warp=on`, re-checks
     every 30 s, and shuts down after 2 failed checks.
 
-## Verified (2026-10-07, Docker via Colima on arm64)
+## Verified
+
+**2026-11-13** (shared `tunnel/` image, Docker via Colima on arm64): `warptorrent leaktest` and
+`warptorrent --masque leaktest` both pass all the checks below. A Big Buck Bunny download over
+WireGuard (kernel module) ran at up to 28 MB/s, into a folder relative to where the command was run.
+
+**2026-10-07** (previous gluetun / iptables tunnels, Docker via Colima on arm64):
 
 `./warptorrent leaktest` and `./warptorrent --masque leaktest` both pass:
 - Exit IP is a WARP IP (`104.28.x.x`, `warp=on`). It differs from the host's real IPv4 and IPv6.
@@ -135,7 +147,8 @@ Live tests with Big Buck Bunny (276 MB) in both modes:
 - **WARP is a privacy relay, not an anonymity network.** Swarm peers see a Cloudflare IP, but
   Cloudflare sees your real IP. WARP exit IPs also geolocate near you.
 - **No port forwarding.** Peers can't connect to you, so you get fewer peers and weak seeding.
-- **IPv4 only.** IPv6 is not routed through either tunnel, and both firewalls drop it.
+- **IPv4 only.** IPv6 is not routed through either tunnel, and the firewall drops it. (The tunnel
+  image can carry IPv6, with `WARP_IPV6=1`; warptorrent leaves it off.)
 - **uTP is disabled.** `utp-native` has no prebuilt binary for this image (Linux/musl/arm64,
   Node 24), so it's replaced by a stub in `torrent/no-utp/` and WebTorrent uses TCP. The cost is
   small: uTP mainly helps reach uTP-only peers, and through WARP nobody can connect in to you anyway.
@@ -146,3 +159,40 @@ Live tests with Big Buck Bunny (276 MB) in both modes:
 - **MASQUE depends on usque.** usque describes itself as unstable. If it breaks, fall back to the
   default WireGuard mode.
 - **`config/` holds secrets.** It contains your WARP private keys for both modes. Don't share it.
+
+## Reusing the tunnel
+
+`tunnel/` is a standalone image: a network namespace whose only way out is WARP. It's meant to be
+reused by other projects. warptail (a Tailscale exit node that egresses via WARP) builds on
+it. Pin this repo as a git submodule and build `FROM` the image:
+
+```yaml
+# compose.yaml
+services:
+  tunnel:                       # base image only; never started
+    build: ./vendor/warptorrent/tunnel
+    image: myapp-tunnel
+    scale: 0
+  app:
+    build:
+      context: ./image
+      additional_contexts: { tunnel: "service:tunnel" }
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment: { WARP_MODE: masque }
+    volumes: ["./config:/config"]
+```
+
+```dockerfile
+# image/Dockerfile
+FROM tunnel
+COPY hooks.sh /etc/warp-tunnel/hooks.sh
+```
+
+Register a device once with `vendor/warptorrent/scripts/register.sh myapp-tunnel masque ./config`.
+Settings (`WARP_MODE`, `WARP_IPV6`, `WARP_DNS`, `BRIDGE_TCP_PORTS`, …) and the hook functions
+(`hook_firewall`, `hook_routes`, `hook_start`, `hook_health`, `hook_stop`) are documented at the
+top of `tunnel/lib.sh`. Hooks can add firewall rules before the final drop, routes and policy
+rules, and supervised processes, but they can't remove the base kill switch.
+`scripts/leaktest.sh <container>` tests any container built this way. Other containers can also
+join the tunnel unchanged with `network_mode: service:tunnel`, the way the torrent client does.

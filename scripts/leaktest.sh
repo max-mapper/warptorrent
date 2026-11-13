@@ -1,30 +1,34 @@
 #!/usr/bin/env bash
-# Proves the kill switch works.
+# Usage: scripts/leaktest.sh [tunnel-container]        (default: warptorrent-tunnel)
+#
+# Proves the kill switch of a running warp-tunnel container (either mode):
 #   1. Egress inside the namespace is a WARP IP, different from the host's real IPs.
-#   2. Simulated WARP outage (packets to the WARP endpoint are dropped, so the tunnel is
-#      dead but still "up"): nothing gets out — by IP, by hostname, TCP or UDP.
-#   3. Tunnel interface torn down: same, nothing gets out.
+#   2. Simulated WARP outage (packets to the WARP endpoint are dropped, so the tunnel is dead
+#      but still "up"): nothing gets out, by IP or by hostname, over TCP, UDP or ICMP.
+#   3. Tunnel interface down: same, nothing gets out.
 # Each probe re-checks that the fault is still in place, because the tunnel actively tries to
-# heal itself and a probe through a healed tunnel would prove nothing.
-# Works for both modes (WireGuard/gluetun and MASQUE/usque): it tests the running tunnel container.
-# Probes run in throwaway containers that join gluetun's namespace, like the torrent client.
+# heal itself, and a probe through a healed tunnel would prove nothing.
+# Probes run in throwaway containers that join the tunnel's namespace, the way a client
+# container does. They have no capabilities, so they can't set socket marks or touch the firewall.
+# Leaves the tunnel restarted and healthy.
 set -euo pipefail
-cd "$(dirname "$0")/.."
 
-C=warptorrent-tunnel
+C="${1:-warptorrent-tunnel}"
 NS="container:$C"
-MODE=$(docker inspect -f '{{index .Config.Labels "warptorrent.mode"}}' "$C")
-case "$MODE" in
-  wireguard) ENDPOINT=$(awk -F= '$1=="WIREGUARD_ENDPOINT_IP"{print $2}' config/warp.env) ;;
-  masque)    ENDPOINT=$(docker exec "$C" jq -r .endpoint_v4 /config/usque.json) ;;
-  *) echo "unknown tunnel mode '$MODE'" >&2; exit 1 ;;
-esac
-echo "tunnel mode: $MODE (endpoint $ENDPOINT)"
+state() { docker exec "$C" sh -c ". /run/warp-tunnel/state; echo \$$1"; }
+MODE=$(state MODE); ENDPOINT=$(state ENDPOINT); WARP_IF=$(state WARP_IF)
+echo "tunnel $C: mode $MODE, interface $WARP_IF, endpoint $ENDPOINT"
 pass() { echo "  ✓ $*"; }
 fail() { echo "  ✗ $*"; exit 1; }
 trace() { docker run --rm --network "$NS" curlimages/curl:latest -s --max-time "${1:-15}" https://www.cloudflare.com/cdn-cgi/trace; }
 
-restore() { echo "→ restoring: restarting tunnel"; docker restart "$C" >/dev/null; }
+wait_healthy() {
+  local i=0
+  until [[ "$(docker inspect -f '{{.State.Health.Status}}' "$C")" == healthy ]]; do
+    i=$((i + 1)); ((i < 60)) || fail "tunnel did not become healthy again"; sleep 2
+  done
+}
+restore() { echo "→ restoring: restarting tunnel"; docker restart "$C" >/dev/null; wait_healthy; }
 trap restore EXIT
 
 docker pull -q curlimages/curl:latest >/dev/null; docker pull -q busybox:latest >/dev/null
@@ -40,14 +44,14 @@ echo "  tunnel IP     : $tun_ip (warp=$warp)"
 [[ "$tun_ip" != "$real4" && "$tun_ip" != "$real6" ]] || fail "tunnel IP equals a real IP"
 pass "namespace exits via WARP with a different IP"
 
-# probe <fault-check-cmd> : all must fail while the fault check still holds
+# probes <fault-check-cmd>: every probe must fail while the fault check still holds
 probes() {
   local still_faulted="$1"
   run() { # name, cmd...
     local name="$1"; shift
-    eval "$still_faulted" || fail "fault healed before probe '$name' — inconclusive"
+    eval "$still_faulted" || fail "fault healed before probe '$name', inconclusive"
     if "$@" >/dev/null 2>&1; then
-      eval "$still_faulted" || fail "fault healed during probe '$name' — inconclusive"
+      eval "$still_faulted" || fail "fault healed during probe '$name', inconclusive"
       fail "$name got through"
     fi
     pass "$name blocked"
@@ -59,16 +63,15 @@ probes() {
   run "ICMP to 9.9.9.9"     docker run --rm --network "$NS" busybox:latest ping -c2 -W3 9.9.9.9
 }
 
-echo "2) simulated WARP outage (drop all packets to $ENDPOINT)"
-docker exec "$C" iptables -I OUTPUT 1 -d "$ENDPOINT" -j DROP
-docker exec "$C" iptables -I INPUT 1 -s "$ENDPOINT" -j DROP
+echo "2) simulated WARP outage (drop all packets to/from $ENDPOINT)"
+docker exec "$C" nft insert rule inet warp output ip daddr "$ENDPOINT" drop comment '"leaktest"'
+docker exec "$C" nft insert rule inet warp input ip saddr "$ENDPOINT" drop comment '"leaktest"'
 sleep 3
-probes "docker exec $C iptables -C OUTPUT -d $ENDPOINT -j DROP 2>/dev/null"
-restore; docker exec "$C" true
-until [[ "$(docker inspect -f '{{.State.Health.Status}}' "$C")" == healthy ]]; do sleep 2; done
+probes "docker exec $C nft list chain inet warp output | grep leaktest >/dev/null"
+restore
 
 echo "3) tunnel interface down"
-docker exec "$C" ip link set tun0 down
-probes "! docker exec $C ip link show tun0 2>/dev/null | grep -q ',UP'"
+docker exec "$C" ip link set "$WARP_IF" down
+probes "! docker exec $C ip link show $WARP_IF 2>/dev/null | grep -q ',UP'"
 
 echo "all leak checks passed"
