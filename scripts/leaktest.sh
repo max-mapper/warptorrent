@@ -20,7 +20,9 @@ MODE=$(state MODE); ENDPOINT=$(state ENDPOINT); WARP_IF=$(state WARP_IF)
 echo "tunnel $C: mode $MODE, interface $WARP_IF, endpoint $ENDPOINT"
 pass() { echo "  ✓ $*"; }
 fail() { echo "  ✗ $*"; exit 1; }
-trace() { docker run --rm --network "$NS" curlimages/curl:latest -s --max-time "${1:-15}" https://www.cloudflare.com/cdn-cgi/trace; }
+CURL=curlimages/curl@sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93
+BUSYBOX=busybox@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4
+trace() { docker run --rm --network "$NS" "$CURL" -s --max-time "${1:-15}" https://www.cloudflare.com/cdn-cgi/trace; }
 
 wait_healthy() {
   local i=0
@@ -31,7 +33,7 @@ wait_healthy() {
 restore() { echo "→ restoring: restarting tunnel"; docker restart "$C" >/dev/null; wait_healthy; }
 trap restore EXIT
 
-docker pull -q curlimages/curl:latest >/dev/null; docker pull -q busybox:latest >/dev/null
+docker pull -q "$CURL" >/dev/null; docker pull -q "$BUSYBOX" >/dev/null
 
 echo "1) egress check"
 real4=$(curl -4 -s --max-time 10 https://www.cloudflare.com/cdn-cgi/trace | awk -F= '$1=="ip"{print $2}' || true)
@@ -43,6 +45,14 @@ echo "  tunnel IP     : $tun_ip (warp=$warp)"
 [[ "$warp" == on || "$warp" == plus ]] || fail "namespace egress is not WARP"
 [[ "$tun_ip" != "$real4" && "$tun_ip" != "$real6" ]] || fail "tunnel IP equals a real IP"
 pass "namespace exits via WARP with a different IP"
+# Docker's embedded resolver answers from the host, outside the tunnel: it must be unreachable
+# even while the tunnel is healthy.
+if docker run --rm --network "$NS" "$BUSYBOX" nslookup -timeout=5 example.com 127.0.0.11 >/dev/null 2>&1; then
+  fail "Docker's resolver (127.0.0.11) answered: DNS could bypass the tunnel"
+fi
+pass "Docker's resolver (127.0.0.11) is blocked"
+docker exec "$C" /usr/local/lib/warp-tunnel/healthcheck.sh || fail "healthcheck fails (resolv.conf or WARP)"
+pass "resolv.conf lists only the tunnel resolvers"
 
 # probes <fault-check-cmd>: every probe must fail while the fault check still holds
 probes() {
@@ -57,10 +67,10 @@ probes() {
     pass "$name blocked"
   }
   run "HTTPS by hostname"   trace 8
-  run "HTTPS to 1.1.1.1"    docker run --rm --network "$NS" curlimages/curl:latest -s --max-time 8 https://1.1.1.1/cdn-cgi/trace
-  run "UDP DNS to 8.8.8.8"  docker run --rm --network "$NS" busybox:latest nslookup -timeout=5 example.com 8.8.8.8
-  run "UDP DNS to 1.1.1.1"  docker run --rm --network "$NS" busybox:latest nslookup -timeout=5 example.com 1.1.1.1
-  run "ICMP to 9.9.9.9"     docker run --rm --network "$NS" busybox:latest ping -c2 -W3 9.9.9.9
+  run "HTTPS to 1.1.1.1"    docker run --rm --network "$NS" "$CURL" -s --max-time 8 https://1.1.1.1/cdn-cgi/trace
+  run "UDP DNS to 8.8.8.8"  docker run --rm --network "$NS" "$BUSYBOX" nslookup -timeout=5 example.com 8.8.8.8
+  run "UDP DNS to 1.1.1.1"  docker run --rm --network "$NS" "$BUSYBOX" nslookup -timeout=5 example.com 1.1.1.1
+  run "ICMP to 9.9.9.9"     docker run --rm --network "$NS" "$BUSYBOX" ping -c2 -W3 9.9.9.9
 }
 
 echo "2) simulated WARP outage (drop all packets to/from $ENDPOINT)"

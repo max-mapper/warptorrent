@@ -93,6 +93,7 @@ table inet warp {
   counter out_blocked {}
   counter out_tunnel {}
   counter ipv6_blocked {}
+  counter docker_dns_blocked {}
 
   chain input {
     type filter hook input priority filter; policy drop;
@@ -107,12 +108,16 @@ table inet warp {
   chain forward {
     type filter hook forward priority filter; policy drop;
     $v6
+    ct state invalid drop
     $NFT_FORWARD
     counter name fwd_blocked drop
   }
 
   chain output {
     type filter hook output priority filter; policy drop;
+    # Docker's embedded resolver listens on loopback in every container, but resolves upstream
+    # from the host, outside the tunnel. Nothing here may use it, even if resolv.conf reverts.
+    ip daddr 127.0.0.11 counter name docker_dns_blocked drop
     oif "lo" accept
     $v6
     oifname "$WARP_IF" accept
@@ -138,8 +143,15 @@ warp_routes() {
     while ip -6 route del default 2>/dev/null; do :; done
     ip -6 route replace unreachable default metric 4000
   fi
-  for d in $WARP_DNS; do echo "nameserver $d"; done > /etc/resolv.conf
+  warp_write_resolv
   log "routing: no default route; $ENDPOINT/32 via $GW; DNS $WARP_DNS (tunnel only)"
+}
+
+# resolv.conf must list exactly $WARP_DNS. Docker owns the file and can rewrite it while the
+# container runs, so the supervisor re-checks it and the healthcheck fails if it has drifted.
+warp_write_resolv() { for d in $WARP_DNS; do echo "nameserver $d"; done > /etc/resolv.conf; }
+warp_resolv_ok() {
+  [ "$(awk '$1=="nameserver" {printf "%s ", $2}' /etc/resolv.conf)" = "$(for d in $WARP_DNS; do printf '%s ' "$d"; done)" ]
 }
 
 warp_default_route() {
@@ -229,6 +241,7 @@ warp_supervise() {
       kill -0 "$p" 2>/dev/null || { log "process $p exited; stopping"; warp_stop 1; }
     done
     ip link show "$WARP_IF" >/dev/null 2>&1 || { log "$WARP_IF disappeared; stopping"; warp_stop 1; }
+    warp_resolv_ok || { log "WARNING: /etc/resolv.conf changed; restoring $WARP_DNS"; warp_write_resolv; }
   done
 }
 
