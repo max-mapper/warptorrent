@@ -106,7 +106,11 @@ downloading, but it can still see how much data you move and when.
      `unreachable` default. Without the tunnel there is no route to the internet, independent of
      the firewall;
   3. points DNS at 1.1.1.1 / 1.0.0.1, which are reachable only through `warp0`. Docker's built-in
-     resolver is bypassed because it would forward queries from the host, outside the tunnel.
+     resolver (`127.0.0.11`) would forward queries from the host, outside the tunnel, so the
+     firewall drops it. If Docker rewrites `resolv.conf`, the supervisor restores it and the
+     healthcheck fails until it does.
+
+  usque and wgcf are pinned by SHA-256, and the base and test images by digest.
 
   Then it starts usque (MASQUE) or configures a WireGuard interface, and routes the default
   through `warp0`. Any setup failure exits the container rather than continuing half-configured.
