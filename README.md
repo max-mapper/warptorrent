@@ -163,7 +163,7 @@ Live tests with Big Buck Bunny (276 MB) in both modes:
 ## Reusing the tunnel
 
 `tunnel/` is a standalone image: a network namespace whose only way out is WARP. It's meant to be
-reused by other projects. warptail (a Tailscale exit node that egresses via WARP) builds on
+reused by other projects. [warptail](https://github.com/max-mapper/warptail) (a Tailscale exit node that egresses via WARP) builds on
 it. Pin this repo as a git submodule and build `FROM` the image:
 
 ```yaml
